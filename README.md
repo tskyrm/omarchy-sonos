@@ -81,10 +81,16 @@ Requirements and caveats:
 ## IPC
 
 ```bash
-omarchy-shell sonos playpause|next|previous|volumeUp|volumeDown|pauseAll|toggle|siriusxm
+omarchy-shell sonos playpause|next|previous|volumeUp|volumeDown|pauseAll|playPauseAll|toggle|siriusxm
 ```
 
-Handy for Hyprland keybindings.
+`playPauseAll` pauses every playing room, and on the next call resumes
+just those rooms. Example Hyprland bindings for `~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + CTRL + ALT + S", "Sonos panel", "omarchy-shell sonos toggle")
+o.bind("SUPER + CTRL + ALT + P", "Sonos play/pause all", "omarchy-shell sonos playPauseAll")
+```
 
 ## How it works
 

@@ -21,6 +21,8 @@ Commands: {"cmd": "...", ...}
   sxmlist       force: bool    emit the SiriusXM channel list ({"sxm": [...]})
   sxm           group, uuid, name, number    play a SiriusXM channel
   pauseall
+  playpauseall                 pause all playing rooms, or resume the ones
+                               the last pause-all paused
 """
 
 import json
@@ -337,6 +339,32 @@ def group_of(zones, uid):
     return find(zones, uid).group
 
 
+paused_by_us = set()
+
+
+def pause_all(zones):
+    """Pause every playing room; remember them for playpauseall. Returns
+    whether anything was playing."""
+    playing = []
+    for z in zones:
+        if not z.is_coordinator:
+            continue
+        try:
+            if z.get_current_transport_info().get("current_transport_state") in ("PLAYING", "TRANSITIONING"):
+                playing.append(z)
+        except Exception:
+            pass
+    for z in playing:
+        try:
+            z.pause()
+        except Exception as e:
+            log(f"pause {z.player_name}: {e}")
+    if playing:
+        paused_by_us.clear()
+        paused_by_us.update(z.uid for z in playing)
+    return bool(playing)
+
+
 def run_command(cmd, zones, favorites):
     name = cmd.get("cmd")
     value = cmd.get("value")
@@ -381,12 +409,18 @@ def run_command(cmd, zones, favorites):
     elif name == "sxm":
         play_sxm(find(zones, cmd["group"]), favorites, cmd.get("uuid"), cmd.get("name", ""), cmd.get("number"))
     elif name == "pauseall":
-        for z in zones:
-            if z.is_coordinator:
-                try:
-                    z.pause()
-                except Exception:
-                    pass
+        pause_all(zones)
+    elif name == "playpauseall":
+        # Pause everything if anything plays; otherwise bring back exactly
+        # the rooms the last pause-all stopped.
+        if not pause_all(zones):
+            for z in zones:
+                if z.uid in paused_by_us and z.is_coordinator:
+                    try:
+                        z.play()
+                    except Exception as e:
+                        log(f"resume {z.player_name}: {e}")
+            paused_by_us.clear()
     else:
         log(f"unknown command {name!r}")
 

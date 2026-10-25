@@ -329,6 +329,7 @@ Panel {
     function volumeUp(): void { root.nudgeGroupVolume(root.primary, root.volumeStep) }
     function volumeDown(): void { root.nudgeGroupVolume(root.primary, -root.volumeStep) }
     function pauseAll(): void { root.send({ cmd: "pauseall" }) }
+    function playPauseAll(): void { root.send({ cmd: "playpauseall" }) }
     function siriusxm(): void { root.open(); root.openSxm() }
     function text(): string { return root.barLabel }
   }
