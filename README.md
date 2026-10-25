@@ -3,6 +3,8 @@
 Control your Sonos speakers from the Omarchy bar. A pill shows what's
 playing; click it for a popup with every room:
 
+<p align="center"><img src="docs/screenshot.png" alt="Sonos panel with rooms, and the SiriusXM channel picker" width="760"></p>
+
 - album art, track, progress, play/pause/skip
 - group volume and per-speaker volume when grouped
 - grouping: link and unlink speakers into any number of groups
