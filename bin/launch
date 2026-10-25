@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Starts bin/sonos-bar, creating its Python environment on first run.
+#
+# Usage: launch [python]
+#   With no argument, uses (and if needed creates) a private venv with SoCo
+#   in ~/.local/share/omarchy-sonos/venv. A python path skips setup and is
+#   used as-is (it must be able to import soco).
+#
+# Setup progress and failures are reported as the daemon's own JSON state
+# lines, so the widget shows them without special handling.
+
+set -uo pipefail
+
+BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-sonos/venv"
+SOCO_SPEC="soco==0.32.0"
+
+status() {
+  local message="${1//\"/\\\"}"
+  printf '{"ok":false,"error":"%s","groups":[],"speakers":[],"favorites":[]}\n' "$message"
+}
+
+python="${1:-}"
+
+if [[ -z $python ]]; then
+  python="$VENV/bin/python"
+  if ! "$python" -c "import soco" >/dev/null 2>&1; then
+    status "First run: installing SoCo (one-time setup)…"
+    if ! command -v python3 >/dev/null; then
+      status "Setup failed: python3 not found"
+      exec sleep infinity
+    fi
+    log="$(mktemp)"
+    if ! { python3 -m venv --clear "$VENV" && "$VENV/bin/pip" install --quiet --disable-pip-version-check "$SOCO_SPEC"; } >"$log" 2>&1; then
+      tail -n 5 "$log" >&2
+      rm -f "$log"
+      status "Setup failed: couldn't install SoCo (see journalctl --user -u omarchy-shell)"
+      # Stay alive so the widget doesn't respawn us into a retry loop.
+      exec sleep infinity
+    fi
+    rm -f "$log"
+  fi
+fi
+
+exec "$python" -u "$BIN/sonos-bar"

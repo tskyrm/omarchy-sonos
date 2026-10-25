@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "id": "tskyrm.sonos",
+  "name": "Sonos",
+  "version": "1.0.0",
+  "author": "tskyrm",
+  "license": "MIT",
+  "description": "Sonos now-playing in the Omarchy bar, with a popup to control every room: transport, group and per-speaker volume, grouping, favorites and a SiriusXM channel picker.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Sonos",
+    "description": "Bar pill with what the main Sonos room is playing and a popup controlling every room.",
+    "category": "Media",
+    "aliases": [
+      "sonos"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "room": "",
+      "maxLabelWidth": 220,
+      "showLabel": true,
+      "volumeStep": 2,
+      "python": ""
+    },
+    "schema": [
+      {
+        "key": "room",
+        "type": "string",
+        "label": "Bar room",
+        "defaultValue": "",
+        "description": "Room the bar follows (e.g. Living Room). Empty follows whichever room is playing."
+      },
+      {
+        "key": "showLabel",
+        "type": "boolean",
+        "label": "Show track in bar",
+        "defaultValue": true
+      },
+      {
+        "key": "maxLabelWidth",
+        "type": "integer",
+        "label": "Max label width (px)",
+        "min": 60,
+        "max": 600,
+        "step": 20,
+        "defaultValue": 220
+      },
+      {
+        "key": "volumeStep",
+        "type": "integer",
+        "label": "Scroll volume step",
+        "min": 1,
+        "max": 10,
+        "step": 1,
+        "defaultValue": 2
+      },
+      {
+        "key": "python",
+        "type": "path",
+        "label": "Python with soco",
+        "defaultValue": "",
+        "description": "Optional. A python that can import soco. Empty sets up a private venv in ~/.local/share/omarchy-sonos on first run."
+      }
+    ]
+  }
+}

@@ -1,0 +1,521 @@
+#!/usr/bin/env python3
+"""Sonos state daemon for the Omarchy bar widget.
+
+Speaks line-delimited JSON: commands arrive on stdin, and a full state
+snapshot is printed to stdout whenever anything changes. Speakers are found
+with a unicast subnet scan (multicast discovery and UPnP event callbacks are
+both blocked by a default ufw setup), cached on disk, and polled.
+
+Commands: {"cmd": "...", ...}
+  active        value: bool    poll fast while the popup is open
+  refresh                      poll now
+  rescan                       rediscover speakers
+  playpause / play / pause / next / previous    group: coordinator uid
+  volume        group, value   group volume 0-100
+  relvolume     group, value   group volume delta
+  mute          group, value   bool
+  speakervolume uid, value     one speaker's volume
+  join          uid, group     add speaker uid to group's coordinator
+  unjoin        uid            take speaker out of its group
+  favorite      group, index   play Sonos favorite #index on group
+  sxmlist       force: bool    emit the SiriusXM channel list ({"sxm": [...]})
+  sxm           group, uuid, name, number    play a SiriusXM channel
+  pauseall
+"""
+
+import json
+import os
+import queue
+import re
+import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from xml.sax.saxutils import escape
+
+import soco
+import soco.discovery
+
+import sxm_channels
+
+FAST_POLL = 2.0
+SLOW_POLL = 6.0
+RESCAN_EVERY = 600.0
+FAVORITES_EVERY = 300.0
+
+CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "omarchy-sonos")
+CACHE_FILE = os.path.join(CACHE_DIR, "speakers.json")
+SXM_CACHE_FILE = os.path.join(CACHE_DIR, "sxm-channels.json")
+SXM_MAX_AGE = 7 * 86400
+SXM_SID = "37"
+UUID_RE = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+commands = queue.Queue()
+pool = ThreadPoolExecutor(max_workers=8)
+
+
+def emit(obj):
+    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
+
+
+def log(msg):
+    sys.stderr.write(f"sonos-bar: {msg}\n")
+    sys.stderr.flush()
+
+
+def read_stdin():
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            commands.put(json.loads(line))
+        except ValueError:
+            log(f"bad command: {line!r}")
+    commands.put({"cmd": "quit"})
+
+
+# ---------------------------------------------------------------- discovery
+
+def load_cached_ips():
+    try:
+        with open(CACHE_FILE) as f:
+            return list(json.load(f).get("ips", []))
+    except (OSError, ValueError):
+        return []
+
+
+def save_cached_ips(ips):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(CACHE_FILE, "w") as f:
+            json.dump({"ips": sorted(ips)}, f)
+    except OSError as e:
+        log(f"cannot write cache: {e}")
+
+
+def reachable(ip):
+    try:
+        return soco.SoCo(ip).all_zones
+    except Exception:
+        return None
+
+
+def discover(use_cache=True):
+    """Return every zone in the household, or an empty set."""
+    if use_cache:
+        for ip in load_cached_ips():
+            zones = reachable(ip)
+            if zones:
+                return zones
+    zones = None
+    try:
+        zones = soco.discover(timeout=2, include_invisible=True)
+    except Exception:
+        pass
+    if not zones:
+        try:
+            zones = soco.discovery.scan_network(include_invisible=True, max_threads=256, scan_timeout=1.0)
+        except Exception as e:
+            log(f"scan failed: {e}")
+    if zones:
+        zones = next(iter(zones)).all_zones
+        save_cached_ips(z.ip_address for z in zones)
+    return zones or set()
+
+
+# -------------------------------------------------------------------- state
+
+def hms_to_s(value):
+    try:
+        h, m, s = (int(p) for p in str(value).split(":"))
+        return h * 3600 + m * 60 + s
+    except ValueError:
+        return 0
+
+
+def group_state(group):
+    coord = group.coordinator
+    transport = coord.get_current_transport_info().get("current_transport_state", "")
+    track = coord.get_current_track_info()
+    media = {}
+    try:
+        media = coord.get_current_media_info()
+    except Exception:
+        pass
+
+    def clean(value):
+        # Some services (SiriusXM) send these as literal strings.
+        value = (value or "").strip()
+        return "" if value.lower() in ("undefined", "null", "none") else value
+
+    title = clean(track.get("title"))
+    artist = clean(track.get("artist"))
+    album = clean(track.get("album"))
+    channel = clean(media.get("channel"))
+    uri = track.get("uri") or ""
+    is_line_in = uri.startswith("x-rincon-stream:") or uri.startswith("x-sonos-htastream:")
+    is_radio = bool(channel) or uri.startswith(("x-sonosapi-stream:", "x-sonosapi-radio:", "x-sonosapi-hls:", "x-rincon-mp3radio:", "aac:", "hls-radio:"))
+    if is_line_in and not title:
+        title = "TV" if uri.startswith("x-sonos-htastream:") else "Line-in"
+    # Radio streams usually leave title empty and put "Artist - Title" in
+    # stream content; fall back to the station name.
+    if is_radio and channel:
+        if not title or title == channel:
+            title = channel
+        elif not artist:
+            artist = channel
+        else:
+            album = channel
+
+    members = sorted(group.members, key=lambda m: (m is not coord, m.player_name))
+    member_states = []
+    for m in members:
+        if not m.is_visible:
+            continue
+        member_states.append({
+            "uid": m.uid,
+            "name": m.player_name,
+            "volume": m.volume,
+            "muted": bool(m.mute),
+        })
+    names = [m["name"] for m in member_states]
+    return {
+        "id": coord.uid,
+        "name": names[0] + (f" + {len(names) - 1}" if len(names) > 1 else "") if names else coord.player_name,
+        "names": names,
+        "state": transport,
+        "playing": transport in ("PLAYING", "TRANSITIONING"),
+        "title": title,
+        "artist": artist,
+        "album": album,
+        "art": track.get("album_art") or "",
+        "position": hms_to_s(track.get("position", "0:00:00")),
+        "duration": hms_to_s(track.get("duration", "0:00:00")),
+        "radio": is_radio,
+        "sxm": sxm_uuid(uri),
+        "lineIn": is_line_in,
+        "volume": group.volume,
+        "muted": bool(group.mute),
+        "members": member_states,
+    }
+
+
+def snapshot(zones, favorites):
+    groups = next(iter(zones)).all_groups if zones else set()
+    groups = [g for g in groups if any(m.is_visible for m in g.members)]
+    results = []
+    for g, fut in [(g, pool.submit(group_state, g)) for g in groups]:
+        try:
+            results.append(fut.result(timeout=8))
+        except Exception as e:
+            log(f"{g.coordinator.player_name}: {e}")
+    # Stable order so cards don't jump around as rooms start and stop.
+    results.sort(key=lambda r: r["name"].lower())
+    speakers = sorted(
+        ({"uid": z.uid, "name": z.player_name} for z in zones if z.is_visible),
+        key=lambda s: s["name"].lower(),
+    )
+    return {"ok": True, "groups": results, "speakers": speakers, "favorites": [f["title"] for f in favorites]}
+
+
+def load_favorites(zones):
+    for z in zones:
+        try:
+            return [{"title": f.title, "item": f} for f in z.music_library.get_sonos_favorites()]
+        except Exception:
+            continue
+    return []
+
+
+# ----------------------------------------------------------------- siriusxm
+#
+# SiriusXM refuses SoCo's account linking, so there is no way to browse it
+# through Sonos. Instead the channel list comes from siriusxm.com (whose
+# channel UUIDs are the ones Sonos uses), and playback borrows the account
+# serial (sn) and token descriptor from an existing SiriusXM favorite. The
+# speaker supplies the actual credentials.
+
+def sxm_uuid(uri):
+    if f"sid={SXM_SID}&" not in uri + "&":
+        return ""
+    m = re.search(UUID_RE, uri)
+    return m.group(0) if m else ""
+
+
+def load_sxm_channels(force=False):
+    if not force:
+        try:
+            if time.time() - os.path.getmtime(SXM_CACHE_FILE) < SXM_MAX_AGE:
+                with open(SXM_CACHE_FILE) as f:
+                    return json.load(f)
+        except (OSError, ValueError):
+            pass
+    try:
+        channels = sxm_channels.channels(sxm_channels.fetch())
+    except Exception as e:
+        # A stale list beats none.
+        try:
+            with open(SXM_CACHE_FILE) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            raise e
+    if channels:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(SXM_CACHE_FILE, "w") as f:
+            json.dump(channels, f)
+    return channels
+
+
+def sxm_account(favorites):
+    """(sn, desc) from SiriusXM favorites, preferring the newest
+    channel-linear style ones."""
+    best = None
+    for fav in favorites:
+        item = fav["item"]
+        try:
+            uri = item.get_uri()
+        except Exception:
+            continue
+        if f"sid={SXM_SID}&" not in uri + "&":
+            continue
+        sn = re.search(r"[?&]sn=(\d+)", uri)
+        desc = re.search(r"<desc[^>]*>([^<]+)</desc>", item.resource_meta_data or "")
+        if not sn or not desc:
+            continue
+        candidate = (sn.group(1), desc.group(1))
+        if "channel-linear" in uri:
+            return candidate
+        best = best or candidate
+    if not best:
+        raise LookupError("add any SiriusXM channel to Sonos favorites first")
+    return best
+
+
+def play_sxm(coord, favorites, uuid, name, number):
+    if not re.fullmatch(UUID_RE, uuid or ""):
+        raise ValueError(f"bad channel id {uuid!r}")
+    sn, desc = sxm_account(favorites)
+    title = f"CH {number} - {name}" if number else name
+    item_id = f"10092064channel-linear%3A{uuid}"
+    meta = (
+        '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" '
+        'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" '
+        'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">'
+        f'<item id="{item_id}" parentID="{item_id}" restricted="true">'
+        f"<dc:title>{escape(title)}</dc:title>"
+        "<upnp:class>object.item.audioItem.audioBroadcast</upnp:class>"
+        '<desc id="cdudn" nameSpace="urn:schemas-rinconnetworks-com:metadata-1-0/">'
+        f"{escape(desc)}</desc></item></DIDL-Lite>"
+    )
+    uri = f"x-sonosapi-stream:channel-linear%3A{uuid}?sid={SXM_SID}&flags=8292&sn={sn}"
+    coord.play_uri(uri, meta=meta)
+
+
+def fetch_sxm_async(force):
+    def work():
+        try:
+            commands.put({"cmd": "_sxmloaded", "channels": load_sxm_channels(force)})
+        except Exception as e:
+            log(f"siriusxm lineup: {e}")
+            commands.put({"cmd": "_sxmloaded", "error": f"Couldn't load SiriusXM channels ({e.__class__.__name__})"})
+    threading.Thread(target=work, daemon=True).start()
+
+
+# ----------------------------------------------------------------- commands
+
+def find(zones, uid):
+    for z in zones:
+        if z.uid == uid:
+            return z
+    raise LookupError(f"unknown speaker {uid}")
+
+
+def group_of(zones, uid):
+    return find(zones, uid).group
+
+
+def run_command(cmd, zones, favorites):
+    name = cmd.get("cmd")
+    value = cmd.get("value")
+
+    if name == "playpause":
+        c = find(zones, cmd["group"])
+        state = c.get_current_transport_info().get("current_transport_state")
+        if state in ("PLAYING", "TRANSITIONING"):
+            c.pause()
+        else:
+            c.play()
+    elif name == "play":
+        find(zones, cmd["group"]).play()
+    elif name == "pause":
+        find(zones, cmd["group"]).pause()
+    elif name == "next":
+        find(zones, cmd["group"]).next()
+    elif name == "previous":
+        find(zones, cmd["group"]).previous()
+    elif name == "volume":
+        group_of(zones, cmd["group"]).volume = max(0, min(100, int(value)))
+    elif name == "relvolume":
+        group_of(zones, cmd["group"]).set_relative_volume(int(value))
+    elif name == "mute":
+        group_of(zones, cmd["group"]).mute = bool(value)
+    elif name == "speakervolume":
+        find(zones, cmd["uid"]).volume = max(0, min(100, int(value)))
+    elif name == "join":
+        find(zones, cmd["uid"]).join(find(zones, cmd["group"]))
+    elif name == "unjoin":
+        find(zones, cmd["uid"]).unjoin()
+    elif name == "favorite":
+        fav = favorites[int(cmd["index"])]["item"]
+        c = find(zones, cmd["group"])
+        # Streams play directly; containers (playlists, albums) refuse
+        # play_uri and have to go through the queue. Same order as soco-cli.
+        try:
+            c.play_uri(uri=fav.get_uri(), meta=fav.resource_meta_data)
+        except Exception:
+            index = c.add_to_queue(fav, as_next=True)
+            c.play_from_queue(index, start=True)
+    elif name == "sxm":
+        play_sxm(find(zones, cmd["group"]), favorites, cmd.get("uuid"), cmd.get("name", ""), cmd.get("number"))
+    elif name == "pauseall":
+        for z in zones:
+            if z.is_coordinator:
+                try:
+                    z.pause()
+                except Exception:
+                    pass
+    else:
+        log(f"unknown command {name!r}")
+
+
+VOLUME_COMMANDS = ("volume", "speakervolume", "relvolume")
+
+
+def drain(first):
+    """The command just received plus everything queued behind it."""
+    batch = [first]
+    while True:
+        try:
+            batch.append(commands.get_nowait())
+        except queue.Empty:
+            return batch
+
+
+def coalesce(batch):
+    """Collapse a burst of volume commands (a slider drag, a fast scroll)
+    into one write per target: the last absolute value wins, and relative
+    steps add up."""
+    out = []
+    slots = {}
+    for cmd in batch:
+        name = cmd.get("cmd")
+        if name not in VOLUME_COMMANDS:
+            out.append(cmd)
+            continue
+        key = ("speaker", cmd.get("uid")) if name == "speakervolume" else ("group", cmd.get("group"))
+        prev = slots.get(key)
+        if prev is not None and name == "relvolume" and prev.get("cmd") in ("volume", "relvolume"):
+            prev["value"] = int(prev["value"]) + int(cmd.get("value", 0))
+        elif prev is not None:
+            prev.clear()
+            prev.update(cmd)
+        else:
+            slots[key] = dict(cmd)
+            out.append(slots[key])
+    return out
+
+
+# --------------------------------------------------------------------- main
+
+def main():
+    threading.Thread(target=read_stdin, daemon=True).start()
+
+    zones = set()
+    favorites = []
+    active = False
+    force_scan = False
+    last_scan = None
+    last_favorites = 0.0
+    last_out = None
+    next_poll = 0.0
+
+    while True:
+        now = time.monotonic()
+        if not zones or force_scan or now - last_scan > RESCAN_EVERY:
+            found = discover(use_cache=not force_scan)
+            force_scan = False
+            last_scan = now
+            if found:
+                zones = found
+                last_favorites = 0.0
+            elif not zones:
+                out = {"ok": False, "error": "No Sonos speakers found", "groups": [], "speakers": [], "favorites": []}
+                if out != last_out:
+                    emit(out)
+                    last_out = out
+
+        if zones and now - last_favorites > FAVORITES_EVERY:
+            favorites = load_favorites(zones) or favorites
+            last_favorites = now
+
+        if zones and now >= next_poll:
+            try:
+                zones = next(iter(zones)).all_zones or zones
+                out = snapshot(zones, favorites)
+            except Exception as e:
+                log(f"poll failed: {e}")
+                out = {"ok": False, "error": f"Lost contact with speakers ({e.__class__.__name__})",
+                       "groups": [], "speakers": [], "favorites": []}
+                zones = set()
+            if out != last_out:
+                emit(out)
+                last_out = out
+            next_poll = time.monotonic() + (FAST_POLL if active else SLOW_POLL)
+
+        timeout = max(0.05, next_poll - time.monotonic()) if zones else 15.0
+        try:
+            cmd = commands.get(timeout=timeout)
+        except queue.Empty:
+            continue
+
+        settle = False
+        for cmd in coalesce(drain(cmd)):
+            name = cmd.get("cmd")
+            if name == "quit":
+                return
+            if name == "active":
+                active = bool(cmd.get("value"))
+            elif name == "rescan":
+                force_scan = True
+            elif name == "sxmlist":
+                fetch_sxm_async(bool(cmd.get("force")))
+                continue
+            elif name == "_sxmloaded":
+                if "error" in cmd:
+                    emit({"sxmError": cmd["error"]})
+                else:
+                    emit({"sxm": cmd["channels"]})
+                continue
+            elif name != "refresh" and zones:
+                try:
+                    run_command(cmd, zones, favorites)
+                except Exception as e:
+                    log(f"{name} failed: {e}")
+                    emit({"commandError": f"{name}: {e}"})
+                if name not in VOLUME_COMMANDS:
+                    settle = True
+        # Transport and grouping changes take a beat to show up; volume
+        # writes are synchronous.
+        if settle:
+            time.sleep(0.25)
+        next_poll = 0.0
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
