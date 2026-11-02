@@ -51,6 +51,8 @@ Panel {
   property var favorites: []
   property string errorText: ""
   property string commandError: ""
+  // True when commandError holds an informational notice, not a failure.
+  property bool commandNotice: false
   property bool connected: false
   property double snapshotMs: Date.now()
   property double nowMs: Date.now()
@@ -231,9 +233,12 @@ Panel {
   function applyLine(line) {
     var obj = Model.parseLine(line)
     if (!obj) return
-    if (obj.commandError !== undefined) {
-      commandError = String(obj.commandError)
-      errorClear.restart()
+    if (obj.commandError !== undefined || obj.notice !== undefined) {
+      commandNotice = obj.notice !== undefined
+      commandError = String(commandNotice ? obj.notice : obj.commandError)
+      // A "Loading…" notice stays up until the result replaces it.
+      if (commandNotice && commandError.slice(-1) === "…") errorClear.stop()
+      else errorClear.restart()
       return
     }
     if (obj.sxm !== undefined || obj.sxmError !== undefined) {
@@ -522,6 +527,7 @@ Panel {
         else if (text === " " || text === "p") root.send({ cmd: "playpause", group: g.id })
         else if (text === "n") root.send({ cmd: "next", group: g.id })
         else if (text === "b") root.send({ cmd: "previous", group: g.id })
+        else if (text === "x" && g.queue) root.send({ cmd: "shuffle", group: g.id, value: !g.shuffle })
         else if (text === "+" || text === "=") root.nudgeGroupVolume(g, root.volumeStep)
         else if (text === "-") root.nudgeGroupVolume(g, -root.volumeStep)
         else if (text === "m") root.send({ cmd: "mute", group: g.id, value: !g.muted })
@@ -618,7 +624,7 @@ Panel {
             visible: root.commandError !== ""
             width: parent.width
             text: root.commandError
-            color: root.bar ? root.bar.urgent : Color.urgent
+            color: root.commandNotice ? root.dim : (root.bar ? root.bar.urgent : Color.urgent)
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
@@ -1042,6 +1048,20 @@ Panel {
           enabled: !!card.group && !card.group.radio && !card.group.lineIn && !!card.group.title
           anchors.verticalCenter: parent.verticalCenter
           onClicked: root.send({ cmd: "next", group: card.group.id })
+        }
+
+        // Only meaningful when the room plays from its queue (a playlist,
+        // album or tracks); outlined while shuffle is on.
+        PanelActionButton {
+          readonly property bool on: !!card.group && card.group.shuffle
+          iconText: on ? "󰒝" : "󰒞"
+          tooltipText: on ? "Shuffle is on (click to turn off)" : "Shuffle is off (click to turn on)"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          visible: !!card.group && card.group.queue
+          bordered: on
+          anchors.verticalCenter: parent.verticalCenter
+          onClicked: root.send({ cmd: "shuffle", group: card.group.id, value: !on })
         }
 
         Item { width: Style.space(6); height: 1 }

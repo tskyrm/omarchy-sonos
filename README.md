@@ -52,7 +52,15 @@ python that can import soco, to skip the private venv).
 Click a room card to select it; favorites and SiriusXM play on the
 selected room.
 
-Keys: `j/k` or arrows select a room · `space`/`p` play/pause · `n` next ·
+A playlist or album favorite replaces the room's queue and plays from the
+top, as in the Sonos app. Long playlists can take a minute to load; the
+popup says so meanwhile. A Sonos queue holds at most 1,000 songs and Sonos
+refuses longer playlists outright (you'll see an error, and the room's
+queue will already have been cleared); save a shorter copy in Spotify
+instead. When a room plays from its queue, the 󰒝 button (or `x`) toggles
+shuffle, outlined while it's on.
+
+Keys: `j/k` or arrows select a room · `space`/`p` play/pause · `n` next · `x` shuffle ·
 `b` previous · `+`/`-` volume · `m` mute · `s` SiriusXM · `r` rescan ·
 `Esc` close
 

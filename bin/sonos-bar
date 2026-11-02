@@ -20,6 +20,7 @@ Commands: {"cmd": "...", ...}
   favorite      group, index   play Sonos favorite #index on group
   sxmlist       force: bool    emit the SiriusXM channel list ({"sxm": [...]})
   sxm           group, uuid, name, number    play a SiriusXM channel
+  shuffle       group, value   bool: shuffle the room's queue
   pauseall
   playpauseall                 pause all playing rooms, or resume the ones
                                the last pause-all paused
@@ -37,6 +38,7 @@ from xml.sax.saxutils import escape
 
 import soco
 import soco.discovery
+import soco.exceptions
 
 import sxm_channels
 
@@ -56,9 +58,14 @@ commands = queue.Queue()
 pool = ThreadPoolExecutor(max_workers=8)
 
 
+emit_lock = threading.Lock()
+
+
 def emit(obj):
-    sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
+    line = json.dumps(obj, separators=(",", ":")) + "\n"
+    with emit_lock:
+        sys.stdout.write(line)
+        sys.stdout.flush()
 
 
 def log(msg):
@@ -158,6 +165,14 @@ def group_state(group):
     channel = clean(media.get("channel"))
     uri = track.get("uri") or ""
     is_line_in = uri.startswith("x-rincon-stream:") or uri.startswith("x-sonos-htastream:")
+    # Playing from the queue (a playlist, album, tracks): shuffle applies.
+    from_queue = (media.get("uri") or "").startswith("x-rincon-queue:")
+    shuffle = False
+    if from_queue:
+        try:
+            shuffle = bool(coord.shuffle)
+        except Exception:
+            pass
     is_radio = bool(channel) or uri.startswith(("x-sonosapi-stream:", "x-sonosapi-radio:", "x-sonosapi-hls:", "x-rincon-mp3radio:", "aac:", "hls-radio:"))
     if is_line_in and not title:
         title = "TV" if uri.startswith("x-sonos-htastream:") else "Line-in"
@@ -199,6 +214,8 @@ def group_state(group):
         "sxm": sxm_uuid(uri),
         "logo": sxm_logo(sxm_uuid(uri)),
         "lineIn": is_line_in,
+        "queue": from_queue,
+        "shuffle": shuffle,
         "volume": group.volume,
         "muted": bool(group.mute),
         "members": member_states,
@@ -427,14 +444,29 @@ def run_command(cmd, zones, favorites):
         find(zones, cmd["uid"]).unjoin()
     elif name == "favorite":
         fav = favorites[int(cmd["index"])]["item"]
-        c = find(zones, cmd["group"])
-        # Streams play directly; containers (playlists, albums) refuse
-        # play_uri and have to go through the queue. Same order as soco-cli.
+        coord = find(zones, cmd["group"])
         try:
-            c.play_uri(uri=fav.get_uri(), meta=fav.resource_meta_data)
+            is_container = fav.get_uri().startswith("x-rincon-cpcontainer:")
         except Exception:
-            index = c.add_to_queue(fav, as_next=True)
-            c.play_from_queue(index, start=True)
+            is_container = False
+        if not is_container:
+            play_favorite(coord, fav)
+            return
+        # Loading a playlist can take a minute; do it off the main loop so
+        # the widget keeps polling and taking commands meanwhile.
+        emit({"notice": f"Loading {fav.title.strip()!r}…"})
+
+        def work():
+            try:
+                notice = play_favorite(coord, fav)
+                emit({"notice": notice} if notice else {"notice": ""})
+            except Exception as e:
+                log(f"favorite failed: {e}")
+                emit({"commandError": f"favorite: {e}"})
+            commands.put({"cmd": "refresh"})
+        threading.Thread(target=work, daemon=True).start()
+    elif name == "shuffle":
+        find(zones, cmd["group"]).shuffle = bool(value)
     elif name == "sxm":
         play_sxm(find(zones, cmd["group"]), favorites, cmd.get("uuid"), cmd.get("name", ""), cmd.get("number"))
     elif name == "pauseall":
@@ -452,6 +484,49 @@ def run_command(cmd, zones, favorites):
             paused_by_us.clear()
     else:
         log(f"unknown command {name!r}")
+
+
+QUEUE_LIMIT = 1000
+# Sonos fetches a whole playlist from the service before answering; a long
+# one can take over a minute, well past SoCo's 20 s default.
+ENQUEUE_TIMEOUT = 180
+
+
+def play_favorite(coord, fav):
+    """Streams play directly. Containers (Spotify playlists, albums) refuse
+    play_uri; like the Sonos app, they replace the room's queue and play
+    from the top. Replacing rather than appending also keeps clear of the
+    1000-track queue limit, which a long playlist on a full queue hits
+    (UPnP error 800).
+
+    The container has to be enqueued with the favorite's resource
+    metadata, which describes the playlist itself; SoCo's
+    add_to_queue(fav) sends the favorite's own DIDL instead, which
+    speakers also reject with error 800."""
+    uri = fav.get_uri()
+    meta = fav.resource_meta_data
+    if not uri.startswith("x-rincon-cpcontainer:"):
+        coord.play_uri(uri=uri, meta=meta)
+        return None
+    coord.clear_queue()
+    try:
+        result = coord.avTransport.AddURIToQueue([
+            ("InstanceID", 0),
+            ("EnqueuedURI", uri),
+            ("EnqueuedURIMetaData", meta),
+            ("DesiredFirstTrackNumberEnqueued", 0),
+            ("EnqueueAsNext", 0),
+        ], timeout=ENQUEUE_TIMEOUT)
+    except soco.exceptions.SoCoUPnPException as e:
+        # The queue is empty at this point, so a rejection here most
+        # likely means the playlist alone is over the limit. There is no
+        # way to load part of it: Sonos won't let SoCo browse Spotify.
+        if e.error_code == "800":
+            raise RuntimeError(f"Sonos couldn't load {fav.title.strip()!r}; it may be over the {QUEUE_LIMIT:,}-song queue limit") from e
+        raise
+    coord.play_from_queue(0, start=True)
+    if int(result.get("NumTracksAdded", 0)) >= QUEUE_LIMIT:
+        return f"Loaded the first {QUEUE_LIMIT:,} songs of {fav.title.strip()!r} (Sonos queue limit)"
 
 
 VOLUME_COMMANDS = ("volume", "speakervolume", "relvolume")
