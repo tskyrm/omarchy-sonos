@@ -197,6 +197,7 @@ def group_state(group):
         "duration": hms_to_s(track.get("duration", "0:00:00")),
         "radio": is_radio,
         "sxm": sxm_uuid(uri),
+        "logo": sxm_logo(sxm_uuid(uri)),
         "lineIn": is_line_in,
         "volume": group.volume,
         "muted": bool(group.mute),
@@ -244,6 +245,34 @@ def sxm_uuid(uri):
         return ""
     m = re.search(UUID_RE, uri)
     return m.group(0) if m else ""
+
+
+sxm_logos = {}
+sxm_logos_requested = False
+
+
+def set_sxm_logos(channels):
+    global sxm_logos
+    sxm_logos = {c["uuid"]: c.get("logo", "") for c in channels or [] if c.get("uuid")}
+
+
+def sxm_logo(uuid):
+    """Channel logo for a playing SiriusXM uuid. The first lookup loads the
+    lineup (cached on disk) in the background and polls again when ready."""
+    global sxm_logos_requested
+    if not uuid:
+        return ""
+    if not sxm_logos and not sxm_logos_requested:
+        sxm_logos_requested = True
+
+        def work():
+            try:
+                set_sxm_logos(load_sxm_channels())
+                commands.put({"cmd": "refresh"})
+            except Exception as e:
+                log(f"siriusxm logos: {e}")
+        threading.Thread(target=work, daemon=True).start()
+    return sxm_logos.get(uuid, "")
 
 
 def load_sxm_channels(force=False):
@@ -531,6 +560,7 @@ def main():
                 if "error" in cmd:
                     emit({"sxmError": cmd["error"]})
                 else:
+                    set_sxm_logos(cmd["channels"])
                     emit({"sxm": cmd["channels"]})
                 continue
             elif name != "refresh" and zones:

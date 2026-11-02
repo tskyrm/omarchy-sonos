@@ -51,6 +51,16 @@ function groupOfSpeaker(groups, uid) {
   return null
 }
 
+// SiriusXM reports no art; show the channel logo instead.
+function artIsLogo(group) {
+  return !!group && !!group.logo
+}
+
+function artSource(group) {
+  if (!group) return ""
+  return group.logo || group.art || ""
+}
+
 function trackLine(group) {
   if (!group || !group.title) return ""
   return group.title + (group.artist ? "  ·  " + group.artist : "")

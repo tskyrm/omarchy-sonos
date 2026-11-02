@@ -21,6 +21,7 @@ Panel {
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property color track: Style.selectedFillFor(foreground, Color.accent)
+  readonly property color logoBackdrop: "#f4f4f4"
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool vertical: bar ? bar.vertical : false
 
@@ -28,6 +29,9 @@ Panel {
 
   readonly property string room: String(setting("room", ""))
   readonly property bool showLabel: setting("showLabel", true) !== false
+  readonly property bool showArt: setting("showArt", true) !== false
+  readonly property bool scrollLabel: setting("scrollLabel", true) !== false
+  readonly property int scrollInterval: Math.max(2, Number(setting("scrollInterval", 10)) || 10)
   readonly property int maxLabelWidth: Number(setting("maxLabelWidth", 220)) || 220
   readonly property int volumeStep: Math.max(1, Number(setting("volumeStep", 2)) || 2)
   readonly property string pythonSetting: String(setting("python", ""))
@@ -119,6 +123,7 @@ Panel {
   }
 
   readonly property var primary: Model.primaryGroup(groups, room)
+  readonly property string primaryArt: Model.artSource(primary)
   readonly property var selectedGroup: Model.findGroup(groups, selectedGroupId) || primary
   readonly property int playingCount: groups.filter(function(g) { return g.playing }).length
   readonly property string barLabel: Model.trackLine(primary)
@@ -332,6 +337,7 @@ Panel {
     function playPauseAll(): void { root.send({ cmd: "playpauseall" }) }
     function siriusxm(): void { root.open(); root.openSxm() }
     function text(): string { return root.barLabel }
+    function state(): string { return JSON.stringify({ connected: root.connected, error: root.errorText, groups: root.groups }) }
   }
 
   // -------------------------------------------------------------------- bar
@@ -367,9 +373,38 @@ Panel {
       anchors.centerIn: parent
       spacing: Style.space(6)
 
+      // Album art, or the channel logo on SiriusXM. Stands in for the
+      // speaker icon once it has loaded.
+      BorderSurface {
+        id: barArt
+        readonly property bool isLogo: Model.artIsLogo(root.primary)
+        readonly property int size: Math.round(Style.bar.iconFont * 1.45)
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.showArt && barArtImage.status === Image.Ready
+        width: isLogo ? Math.round(size * 1.6) : size
+        height: size
+        radius: Style.space(3)
+        // SiriusXM's color logos are drawn for a light background.
+        color: isLogo ? root.logoBackdrop : Style.normalFillFor(root.foreground, Color.accent)
+        borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
+
+        Image {
+          id: barArtImage
+          anchors.fill: parent
+          anchors.margins: barArt.isLogo ? Style.space(2) : 1
+          fillMode: barArt.isLogo ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+          asynchronous: true
+          cache: true
+          sourceSize.width: 96
+          sourceSize.height: 96
+          source: root.showArt ? root.primaryArt : ""
+        }
+      }
+
       Text {
         textFormat: Text.PlainText
         anchors.verticalCenter: parent.verticalCenter
+        visible: !barArt.visible
         text: root.primary && root.primary.playing ? "󰓃" : "󰓄"
         color: root.foreground
         font.family: root.fontFamily
@@ -377,17 +412,72 @@ Panel {
         renderType: Text.NativeRendering
       }
 
-      Text {
-        textFormat: Text.PlainText
+      // Track label. When it is wider than maxLabelWidth it rests for
+      // scrollInterval seconds, then scrolls through once and wraps back
+      // to the start (a second copy trails the first so the wrap is seamless).
+      Item {
+        id: marquee
+        readonly property bool overflow: labelText.implicitWidth > root.maxLabelWidth
+        readonly property real gap: Style.space(40)
+        readonly property real distance: labelText.implicitWidth + gap
         anchors.verticalCenter: parent.verticalCenter
         visible: !root.vertical && root.showLabel && root.hasTrack
-        text: root.barLabel
-        width: Math.min(implicitWidth, root.maxLabelWidth)
-        elide: Text.ElideRight
-        color: root.foreground
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.body
-        renderType: Text.NativeRendering
+        width: Math.min(labelText.implicitWidth, root.maxLabelWidth)
+        height: labelText.implicitHeight
+        clip: true
+
+        Row {
+          id: strip
+          spacing: marquee.gap
+
+          Text {
+            id: labelText
+            textFormat: Text.PlainText
+            text: root.barLabel
+            elide: marquee.overflow && !root.scrollLabel ? Text.ElideRight : Text.ElideNone
+            width: marquee.overflow && !root.scrollLabel ? root.maxLabelWidth : implicitWidth
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            renderType: Text.NativeRendering
+          }
+
+          Text {
+            visible: marquee.overflow && root.scrollLabel
+            textFormat: Text.PlainText
+            text: root.barLabel
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            renderType: Text.NativeRendering
+          }
+        }
+
+        SequentialAnimation {
+          id: scroll
+          running: marquee.visible && marquee.overflow && root.scrollLabel
+          loops: Animation.Infinite
+          onRunningChanged: if (!running) strip.x = 0
+
+          PauseAnimation { duration: root.scrollInterval * 1000 }
+          NumberAnimation {
+            target: strip
+            property: "x"
+            from: 0
+            to: -marquee.distance
+            // About 40 px a second, whatever the label's length.
+            duration: Math.round(marquee.distance / Style.space(40) * 1000)
+          }
+        }
+
+        // A new track starts from the beginning.
+        Connections {
+          target: root
+          function onBarLabelChanged() {
+            strip.x = 0
+            if (scroll.running) scroll.restart()
+          }
+        }
       }
     }
   }
@@ -815,19 +905,22 @@ Panel {
           width: Style.space(56)
           height: Style.space(56)
           radius: Style.spacing.labelGap
-          color: Style.normalFillFor(root.foreground, Color.accent)
+          color: Model.artIsLogo(card.group) ? root.logoBackdrop : Style.normalFillFor(root.foreground, Color.accent)
           borderSpec: Border.controlSpec("normal", root.foreground, Color.accent)
 
           Image {
             id: artImage
             anchors.fill: parent
-            anchors.margins: Style.space(2)
-            fillMode: Image.PreserveAspectCrop
+            // SiriusXM channels get their logo (fit, not cropped) instead
+            // of the empty art Sonos reports for them.
+            readonly property bool isLogo: Model.artIsLogo(card.group)
+            anchors.margins: isLogo ? Style.space(4) : Style.space(2)
+            fillMode: isLogo ? Image.PreserveAspectFit : Image.PreserveAspectCrop
             asynchronous: true
             cache: true
             sourceSize.width: 128
             sourceSize.height: 128
-            source: card.group && card.group.art ? card.group.art : ""
+            source: Model.artSource(card.group)
             visible: status === Image.Ready
           }
 

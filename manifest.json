@@ -25,6 +25,9 @@
       "room": "",
       "maxLabelWidth": 220,
       "showLabel": true,
+      "showArt": true,
+      "scrollLabel": true,
+      "scrollInterval": 10,
       "volumeStep": 2,
       "python": ""
     },
@@ -41,6 +44,29 @@
         "type": "boolean",
         "label": "Show track in bar",
         "defaultValue": true
+      },
+      {
+        "key": "showArt",
+        "type": "boolean",
+        "label": "Show artwork in bar",
+        "defaultValue": true,
+        "description": "Album art, or the channel logo on SiriusXM, in place of the speaker icon."
+      },
+      {
+        "key": "scrollLabel",
+        "type": "boolean",
+        "label": "Scroll long track names",
+        "defaultValue": true,
+        "description": "Scroll a track label that doesn't fit instead of cutting it off with an ellipsis."
+      },
+      {
+        "key": "scrollInterval",
+        "type": "integer",
+        "label": "Seconds between scrolls",
+        "min": 2,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 10
       },
       {
         "key": "maxLabelWidth",

@@ -5,7 +5,7 @@ playing; click it for a popup with every room:
 
 <p align="center"><img src="docs/screenshot.png" alt="Sonos panel with rooms, and the SiriusXM channel picker" width="760"></p>
 
-- album art, track, progress, play/pause/skip
+- album art (the channel logo on SiriusXM), track, progress, play/pause/skip
 - group volume and per-speaker volume when grouped
 - grouping: link and unlink speakers into any number of groups
 - your Sonos favorites, one click to play on the selected room
@@ -38,9 +38,14 @@ Update with `omarchy plugin update tskyrm.sonos`; remove with
 The bar follows whichever room is playing. To pin it to one room:
 `omarchy bar set tskyrm.sonos room "Living Room"`
 
+The bar shows the playing room's artwork (the channel logo on SiriusXM) and
+its track. A track label wider than `maxLabelWidth` rests for
+`scrollInterval` seconds (default 10), then scrolls through once and wraps.
+
 Other settings (`omarchy bar set tskyrm.sonos <key> <value>`): `showLabel`,
-`maxLabelWidth`, `volumeStep`, `python` (a python that can import soco, to
-skip the private venv).
+`showArt`, `scrollLabel` (false cuts long labels off with an ellipsis
+instead), `scrollInterval`, `maxLabelWidth`, `volumeStep`, `python` (a
+python that can import soco, to skip the private venv).
 
 ## Popup
 
@@ -83,6 +88,9 @@ Requirements and caveats:
 ```bash
 omarchy-shell sonos playpause|next|previous|volumeUp|volumeDown|pauseAll|playPauseAll|toggle|siriusxm
 ```
+
+`omarchy-shell sonos state` prints what the widget currently has loaded
+(every room's track, art and volume) as JSON, for debugging.
 
 `playPauseAll` pauses every playing room, and on the next call resumes
 just those rooms. Example Hyprland bindings for `~/.config/hypr/bindings.lua`:
