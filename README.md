@@ -41,6 +41,8 @@ The bar follows whichever room is playing. To pin it to one room:
 The bar shows the playing room's artwork (the channel logo on SiriusXM) and
 its track. A track label wider than `maxLabelWidth` rests for
 `scrollInterval` seconds (default 10), then scrolls through once and wraps.
+It only scrolls while the room is playing; paused or stopped, it is cut off
+with an ellipsis.
 
 Other settings (`omarchy bar set tskyrm.sonos <key> <value>`): `showLabel`,
 `showArt`, `scrollLabel` (false cuts long labels off with an ellipsis
