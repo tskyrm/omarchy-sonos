@@ -423,6 +423,8 @@ Panel {
       Item {
         id: marquee
         readonly property bool overflow: labelText.implicitWidth > root.maxLabelWidth
+        // Only scroll while something is actually playing; paused/stopped elides.
+        readonly property bool scrolling: overflow && root.scrollLabel && !!root.primary && root.primary.playing
         readonly property real gap: Style.space(40)
         readonly property real distance: labelText.implicitWidth + gap
         anchors.verticalCenter: parent.verticalCenter
@@ -439,8 +441,8 @@ Panel {
             id: labelText
             textFormat: Text.PlainText
             text: root.barLabel
-            elide: marquee.overflow && !root.scrollLabel ? Text.ElideRight : Text.ElideNone
-            width: marquee.overflow && !root.scrollLabel ? root.maxLabelWidth : implicitWidth
+            elide: marquee.overflow && !marquee.scrolling ? Text.ElideRight : Text.ElideNone
+            width: marquee.overflow && !marquee.scrolling ? root.maxLabelWidth : implicitWidth
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
@@ -448,7 +450,7 @@ Panel {
           }
 
           Text {
-            visible: marquee.overflow && root.scrollLabel
+            visible: marquee.scrolling
             textFormat: Text.PlainText
             text: root.barLabel
             color: root.foreground
@@ -460,7 +462,7 @@ Panel {
 
         SequentialAnimation {
           id: scroll
-          running: marquee.visible && marquee.overflow && root.scrollLabel
+          running: marquee.visible && marquee.scrolling
           loops: Animation.Infinite
           onRunningChanged: if (!running) strip.x = 0
 
