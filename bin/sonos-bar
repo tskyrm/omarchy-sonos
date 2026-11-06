@@ -241,9 +241,14 @@ def snapshot(zones, favorites):
 
 
 def load_favorites(zones):
+    """Sonos S2 injects Sonos Radio shortcuts ("Discover Sonos Radio",
+    "Sonos Presents", "Trending Now") into every household's favorites.
+    They're browse links with no stream URI, so they can't be played here
+    and are skipped along with anything else lacking a resource."""
     for z in zones:
         try:
-            return [{"title": f.title, "item": f} for f in z.music_library.get_sonos_favorites()]
+            return [{"title": f.title, "item": f} for f in z.music_library.get_sonos_favorites()
+                    if f.resources and f.resources[0].uri]
         except Exception:
             continue
     return []
